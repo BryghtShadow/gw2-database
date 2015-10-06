@@ -14,51 +14,129 @@
  */
 class GW2Items extends GW2API{
 
-	/**
-	 * @var array
-	 */
-	public $attributes = [];
+	public $chunksize = 50;
+	private $temp_data = [];
+	private $temp_failed = [];
 
-	/**
-	 * @var array
-	 */
-	public $combinations = [];
+	private $attribute_map = [
+		'single' => [
+			'winter_1'   => 'BoonDuration',
+			'festering'  => 'ConditionDamage',
+			'givers_1'   => 'ConditionDuration',
+			'compassion' => 'Healing',
+			'might'      => 'Power',
+			'precision'  => 'Precision',
+			'resilience' => 'Toughness',
+			'vitality'   => 'Vitality',
+		],
+		'double' => [
+			'ravaging'     => ['ConditionDamage', 'Precision'],
+			'lingering'    => ['ConditionDamage', 'Vitality'],
+			'givers_2w'    => ['ConditionDuration', 'Vitality'], //weapon
+			'rejuvenation' => ['Healing', 'Power'],
+			'mending'      => ['Healing', 'Vitality'],
+			'potency'      => ['Power', 'ConditionDamage'],
+			'honing'       => ['Power', 'CritDamage'],
+			'strength'     => ['Power', 'Precision'],
+			'vigor'        => ['Power', 'Vitality'],
+			'penetration'  => ['Precision', 'CritDamage'],
+			'hunter'       => ['Precision', 'Power'],
+			'enduring'     => ['Toughness', 'ConditionDamage'],
+			'givers_2a '   => ['Toughness', 'Healing'], //armor
+			'hearty'       => ['Vitality', 'Toughness'],
+			'stout'        => ['Toughness', 'Precision'],
+		],
+		'triple' => [
+			'carrion'    => ['ConditionDamage', 'Power', 'Vitality'],
+			'rabid'      => ['ConditionDamage', 'Precision', 'Toughness'],
+			'dire'       => ['ConditionDamage', 'Toughness', 'Vitality'],
+			'givers_3w'  => ['ConditionDuration', 'Precision', 'Vitality'], //weapon
+			'apothecary' => ['Healing', 'ConditionDamage', 'Toughness'],
+			'cleric'     => ['Healing', 'Power', 'Toughness'],
+			'magi'       => ['Healing', 'Precision', 'Vitality'],
+			'zealot'     => ['Power', 'Healing', 'Precision'], //same stats as Keeper's
+			'berserker'  => ['Power', 'Precision', 'CritDamage'],
+			'soldier'    => ['Power', 'Toughness', 'Vitality'],
+			'valkyrie'   => ['Power', 'Vitality', 'CritDamage'],
+			'rampager'   => ['Precision', 'ConditionDamage', 'Power'],
+			'assassin'   => ['Precision', 'Power', 'CritDamage'],
+			'knight_3s'  => ['Precision', 'Power', 'Toughness'], //suffix
+			'settler'    => ['Toughness', 'ConditionDamage', 'Healing'],
+			'givers_3a'  => ['Toughness', 'Healing', 'BoonDuration'], //armor
+			'cavalier'   => ['Toughness', 'Power', 'CritDamage'],
+			'knight_3p'  => ['Toughness', 'Power', 'Precision'], //prefix
+			'shaman_3p'  => ['Vitality', 'ConditionDamage', 'Healing'], //prefix
+			'sentinel'   => ['Vitality', 'Power', 'Toughness'],
+			'shaman_3s'  => ['Vitality', 'Healing', 'Power'], //suffix
+		],
+	];
 
-	private $skins = [];
-	private $items = [];
-	private $recipes = [];
+	public function __destruct(){
+		print_r($this->temp_failed);
+	}
 
-	/**
-	 *
-	 */
-	public function __construct(){
-		parent::__construct();
+	private function attribute_combination($infix_upgrade){
+		$att = [];
+		$mod = [];
 
-		$this->attributes = $this->db->simple_query('SELECT `shortname`, `primary`, `name_'.$this->conf->var['lang'].'` AS `name` FROM `gw2_attributes`', true, 'shortname');
+		foreach($infix_upgrade['attributes'] as $a){
+			$att[] = $a['attribute'];
+			$mod[] = $a['modifier'];
+		}
 
-		$this->combinations = $this->db->simple_query('SELECT `id`, `attribute1`, `attribute2`, `attribute3`, `prefix_'.$this->conf->var['lang'].'` AS `prefix`, `suffix_'.$this->conf->var['lang'].'` AS `suffix` FROM `gw2_attribute_combinations`', true, 'id');
-		$this->combinations = array_map(function ($arr){
-			$ret = [
-				'id'         => $arr['id'],
-				'attributes' => [$arr['attribute1']],
-				'prefix'     => $arr['prefix'],
-				'suffix'     => $arr['suffix'],
-			];
-			if(!empty($arr['attribute2'])){
-				$ret['attributes'][] = $arr['attribute2'];
-				if(!empty($arr['attribute3'])){
-					$ret['attributes'][] = $arr['attribute3'];
+		array_multisort($mod, SORT_DESC, SORT_NUMERIC, $att, SORT_STRING);
+
+		// Condition Duration is only available as major attribute, so put it on top
+		if(isset($infix_upgrade['buff']['skill_id']) && (int)$infix_upgrade['buff']['skill_id'] === 16631){
+			array_unshift($att, 'ConditionDuration');
+		}
+
+		// Boon duration is only a minor attribute, so add it to the end
+		if(isset($infix_upgrade['buff']['skill_id']) && (int)$infix_upgrade['buff']['skill_id'] === 16517){
+			$att[] = 'BoonDuration';
+		}
+
+		$count = count($att);
+
+		if($count === 1){
+			// SELECT COUNT(*) AS `count`, `attr1`, `attr_name` FROM `gw2_items` WHERE `attr1` != '' AND `attr2` = '' AND `attr3` = '' GROUP BY `attr1`
+			return [array_search($att[0], $this->attribute_map['single']), $att];
+
+		}
+
+		if($count === 2){
+			// SELECT COUNT(*) AS `count`, `attr1`, `attr2`, `attr_name` FROM `gw2_items` WHERE `attr1` != '' AND `attr2` != '' AND `attr3` = '' GROUP BY `attr1`, `attr2`
+			foreach($this->attribute_map['double'] as $name => $map){
+				$arr = array_diff_assoc($att, $map);
+				if(empty($arr)){
+					return [$name, $att];
 				}
 			}
+		}
 
-			return $ret;
-		}, $this->combinations);
+		if($count === 3){
+			// SELECT COUNT(*) AS `count`, `attr1`, `attr2`, `attr3`, `attr_name` FROM `gw2_items` WHERE `attr1` != '' AND `attr2` != '' AND `attr3` != '' GROUP BY `attr1`, `attr2`, `attr3`
+			foreach($this->attribute_map['triple'] as $name => $map){
+				$arr = array_diff_assoc($att, $map);
+				if(empty($arr)){
+					return [$name, $att];
+				}
+			}
+		}
+
+		if($count === 7){
+			// celestial is currently the only combination of 7 attributes
+			return ['celestial', []];
+		}
+
+		return ['', []];
 	}
 
 	/**
 	 *
 	 */
-	public function item_refresh(){
+	public function refresh_db(){
+		global $db;
 		$this->request('v2/items');
 		if(is_array($this->api_response) && count($this->api_response) > 0){
 			$values = [];
@@ -66,7 +144,7 @@ class GW2Items extends GW2API{
 			foreach($this->api_response as $item){
 				$values[] = [$item, $time];
 			}
-			$this->db->multi_insert('INSERT IGNORE INTO '.TABLE_ITEMS.' (`id`, `date_added`) VALUES (?, ?)', $values);
+			$db->multi_insert('INSERT IGNORE INTO '.TABLE_ITEMS.' (`id`, `date_added`) VALUES (?, ?)', $values);
 			$this->log('Item database refresh done. '.count($this->api_response).' items in items.json.');
 		}
 	}
@@ -74,87 +152,90 @@ class GW2Items extends GW2API{
 	/**
 	 * @param bool $full_update
 	 */
-	public function item_update($full_update = false){
-		// going to blow up the memory here...
-		$this->items = $this->db->simple_query(
-			'SELECT `id`, `data_de`, `data_en`, `data_es`, `data_fr`, `update_time`
-				FROM '.TABLE_ITEMS.(
-			$full_update
-				? ''
-				: ' WHERE `updated` = 0'
-			), true, 'id');
+	public function update_db($full_update = false){
+		global $db;
 
-		if(is_array($this->items)){
-			// fetch all the IDs into a one dimensional array and put them into chunks...
-			$ids = array_chunk(array_keys($this->items), $this->chunksize);
+		// reset temp arrays
+		$this->temp_data = [];
+		$this->temp_failed = [];
+
+		// todo: WHERE update_time < ... ?
+		$items = $db->prepared_query('SELECT `id` FROM '.TABLE_ITEMS.($full_update ? '' : ' WHERE `updated` = 0'));
+
+		if(is_array($items)){
+			$ids = [];
+
+			// fetch all the IDs into a one dimensional array...
+			foreach($items as $id){
+				$ids[] = $id['id'];
+			}
+
+			// ...and put them into chunks...
+			$ids = array_chunk($ids, $this->chunksize);
 
 			$urls = [];
 			// ...now loop through the chunks
 			foreach($ids as $chunk){
+				$chunk = implode(',', $chunk);
 				// ...and create the request for each chunk and language
 				foreach($this->api_languages as $lang){
-					$urls[] = http_build_query(['lang' => $lang, 'ids' => implode(',', $chunk)]);
+					$urls[] = http_build_query(['lang' => $lang, 'ids' => $chunk]);
 				}
 			}
 
-			$this->multi_request($urls, $this->api_base.'v2/items?', function ($response, $info){
+			$rolling_curl = new RollingCurl($urls, function($data, $info){
+				global $db;
 				// get the current request params
-				parse_str(parse_url($info['url'], PHP_URL_QUERY), $params);
+				$url = parse_url($info['url']);
+				parse_str($url['query'], $params);
 
-				if(in_array($info['http_code'], [200, 206], true)){
-					$response = json_decode($response, true);
-					$changes = [];
+				if($info['http_code'] === 200){
+					$data = json_decode($data, true);
 
-					// push the data for each item to the temp array and create a diff
-					foreach($response as $item){
-						$item = array_sort_recursive($item);
+					// push the data for each item to the temp array
+					foreach($data as $item){
 						$this->temp_data[$item['id']][$params['lang']] = $item;
-						$old = json_decode(@$this->items[$item['id']]['data_'.$params['lang']], true);
-						$old = is_array($old) ? array_sort_recursive($old) : [];
-						if(!empty($old) && !empty(array_diff_assoc_recursive($old, $item, true))){
-							$changes[] = [
-								$item['id'],
-								'item',
-								$params['lang'],
-								$this->items[$item['id']]['update_time'],
-								json_encode($old),
-							];
-						}
-						unset($this->items[$item['id']]);
 					}
 
-					$sql = 'INSERT INTO '.TABLE_DIFF.' (`db_id`, `type`, `lang`, `date`, `data`) VALUES (?,?,?,?,?)';
-					$this->db->multi_insert($sql, $changes);
+					$ids = explode(',', $params['ids']);
 
 					// check if we got the data for all languages
-					$ids = explode(',', $params['ids']);
 					if(count($this->temp_data[$ids[0]]) === count($this->api_languages)){
-						// loop through the chunk's item ids and process the data
 						$values = [];
-						foreach($ids as $id){
-							$values[] = $this->parse_itemdata($id);
-							// remove the processed item from the temp array to not blow up the memory
-							unset($this->temp_data[$id]);
-						}
-
 						$sql = 'UPDATE '.TABLE_ITEMS.' SET `signature` = ?, `file_id` = ?, `rarity` = ?, `weight` = ?, `type` = ?,
-					`subtype` = ?, `unlock_type` = ?, `level` = ?, `value` = ?, `pvp` = ?, `attr_combination` = ?, `unlock_id` = ?,
+					`subtype` = ?, `unlock_type` = ?, `level` = ?, `value` = ?, `pvp` = ?, `attr_name` = ?, `unlock_id` = ?,
 					`name_de` = ?, `name_en` = ?, `name_es` = ?, `name_fr` = ?, `data_de` = ?, `data_en` = ?, `data_es` = ?,
 					`data_fr` = ?, `updated` = ?, `update_time` = ?  WHERE `id` = ?';
 
-						$this->db->multi_insert($sql, $values);
-						unset($response, $values, $changes);
+						// loop through the chunk's item ids and process the data
+						foreach($ids as $id){
+							$values[] = $this->parse_itemdata($id);
+
+							// remove the processed item from the temp array to not blow up the memory
+							unset($this->temp_data[$id]);
+						}
+						$db->multi_insert($sql, $values);
 					}
 				}
 				else{
 					$this->temp_failed[$params['lang']][] = $params['ids'];
 				}
 			});
+
+			$rolling_curl->base_url = $this->api_base.'v2/items?';
+			$rolling_curl->curl_options = [
+				CURLOPT_SSL_VERIFYPEER => true,
+				CURLOPT_SSL_VERIFYHOST => 2,
+				CURLOPT_CAINFO         => BASEDIR.$this->ca_info,
+				CURLOPT_RETURNTRANSFER => true,
+			];
+
+			$rolling_curl->process();
 		}
 	}
 
 	/**
-	 * @param int $id
+	 * @param $id
 	 *
 	 * @return array
 	 */
@@ -164,15 +245,9 @@ class GW2Items extends GW2API{
 		$s = [chr(194).chr(160), '  '];
 
 		switch(true){
-			case isset($data['en']['details']['recipe_id']) :
-				$unlock_id = $data['en']['details']['recipe_id'];
-				break;
-			case isset($data['en']['details']['color_id'])  :
-				$unlock_id = $data['en']['details']['color_id'];
-				break;
-			default:
-				$unlock_id = 0;
-				break;
+			case isset($data['en']['details']['recipe_id']) : $unlock_id = $data['en']['details']['recipe_id']; break;
+			case isset($data['en']['details']['color_id'])  : $unlock_id = $data['en']['details']['color_id']; break;
+			default: $unlock_id = 0; break;
 		}
 
 		$file_id = explode('/', str_replace(['https://render.guildwars2.com/file/', '.png'], '', $data['en']['icon']));
@@ -181,14 +256,14 @@ class GW2Items extends GW2API{
 			$file_id[0],
 			$file_id[1],
 			$data['en']['rarity'],
-			@$data['en']['details']['weight_class'],
+			isset($data['en']['details']['weight_class']) ? ($data['en']['details']['weight_class']) : 'None',
 			$data['en']['type'],
-			@$data['en']['details']['type'],
-			@$data['en']['details']['unlock_type'],
-			$data['en']['level'],
-			$data['en']['vendor_value'],
-			in_array('Pvp', $data['en']['game_types']) && in_array('PvpLobby', $data['en']['game_types']),
-			isset($data['en']['details']['infix_upgrade']) ? $this->attribute_combination($data['en']['details']['infix_upgrade']) : 0,
+			isset($data['en']['details']['type']) ? $data['en']['details']['type'] : '',
+			isset($data['en']['details']['unlock_type']) ? $data['en']['details']['unlock_type'] : '',
+			(int)$data['en']['level'],
+			(int)$data['en']['vendor_value'],
+			in_array('Pvp',$data['en']['game_types']) && in_array('PvpLobby',$data['en']['game_types']) ? 1 : 0,
+			'', // todo: fix attribute_map
 			$unlock_id,
 			str_replace($s, ' ', $data['de']['name']),
 			str_replace($s, ' ', $data['en']['name']),
@@ -200,263 +275,10 @@ class GW2Items extends GW2API{
 			json_encode($data['fr']),
 			1,
 			time(),
-			$data['en']['id'],
+			$data['en']['id']
 		];
 	}
 
-	/**
-	 * @param array $infix_upgrade
-	 *
-	 * @return bool|int
-	 *
-	 * @link http://wiki.guildwars2.com/wiki/Item_nomenclature
-	 */
-	private function attribute_combination(array $infix_upgrade){
-		$att = array_column($infix_upgrade['attributes'], 'attribute');
-		if(isset($infix_upgrade['buff']['skill_id'])){
-			switch((int)$infix_upgrade['buff']['skill_id']){
-				// Condition Duration is only available as major attribute, so put it on top
-				case 16631:
-					array_unshift($att, 'ConditionDuration');
-					break;
-				// Boon duration is only a minor attribute, so add it to the end
-				case 16517:
-					$att[] = 'BoonDuration';
-					break;
-			}
-		}
-
-		$key = array_search($att, array_column($this->combinations, 'attributes', 'id'));
-		if(count($att) === 7){
-			return 52; // celestial todo: HARDCODE ALL THE THINGS!
-		}
-		else if(isset($this->combinations[$key])){
-			return $this->combinations[$key]['id'];
-		}
-
-		return false;
-	}
-
-	/**
-	 *
-	 */
-	public function recipe_refresh(){
-		$this->request('v2/recipes');
-		$data = $this->api_response;
-		$values = [];
-		$time = time();
-		foreach($data as $id){
-			$values[] = [$id, $time];
-		}
-		$this->db->multi_insert('INSERT IGNORE INTO '.TABLE_RECIPES.' (`recipe_id`, `date_added`) VALUES (?,?)', $values);
-		$this->log('Recipe database refresh done. '.count($this->api_response).' items in recipes.json.');
-	}
-
-	/**
-	 * @param bool $full_update
-	 */
-	public function recipe_update($full_update = false){
-		$this->recipes = $this->db->simple_query(
-			'SELECT `recipe_id`, `data`, `update_time`
-				FROM '.TABLE_RECIPES.(
-			$full_update
-				? ''
-				: ' WHERE `updated` = 0'
-			), true, 'recipe_id');
-
-		if(is_array($this->recipes)){
-
-			$ids = array_chunk(array_keys($this->recipes), $this->chunksize);
-			$urls = [];
-			foreach($ids as $chunk){
-				$urls[] = http_build_query(['ids' => implode(',', $chunk)]);
-			}
-
-			unset($ids);
-
-			$this->multi_request($urls, $this->api_base.'v2/recipes?', function ($response, $info){
-				if(in_array($info['http_code'], [200, 206], true)){
-					$response = json_decode($response, true);
-					$values = [];
-					$changes = [];
-					foreach($response as $recipe){
-						$recipe = array_sort_recursive($recipe);
-
-						$disciplines = array_map(function($value){
-							return 'CRAFT_'.strtoupper($value);
-						}, $recipe['disciplines']);
-
-						$values[] = [
-							$recipe['output_item_id'],
-							$recipe['output_item_count'],
-							$this->set_bitflag($disciplines),
-							$recipe['min_rating'],
-							$recipe['type'],
-							is_array($recipe['flags']) && in_array('LearnedFromItem', $recipe['flags']),
-							@$recipe['ingredients'][0]['item_id'],
-							@$recipe['ingredients'][0]['count'],
-							@$recipe['ingredients'][1]['item_id'],
-							@$recipe['ingredients'][1]['count'],
-							@$recipe['ingredients'][2]['item_id'],
-							@$recipe['ingredients'][2]['count'],
-							@$recipe['ingredients'][3]['item_id'],
-							@$recipe['ingredients'][3]['count'],
-							json_encode($recipe),
-							1,
-							time(),
-							$recipe['id'],
-						];
-
-						$old = json_decode(@$this->recipes[$recipe['id']]['data'], true);
-						$old = is_array($old) ? array_sort_recursive($old) : [];
-						if(!empty($old) && !empty(array_diff_assoc_recursive($old, $recipe, true))){
-							$changes[] = [
-								$recipe['id'],
-								'recipe',
-								$this->recipes[$recipe['id']]['update_time'],
-								json_encode($old),
-							];
-						}
-						unset($this->recipes[$recipe['id']]);
-						$this->log('Updated recipe #'.$recipe['id']);
-					}
-
-					$sql = 'INSERT INTO '.TABLE_DIFF.' (`db_id`, `type`, `date`, `data`) VALUES (?,?,?,?)';
-					$this->db->multi_insert($sql, $changes);
-
-					$sql = 'UPDATE '.TABLE_RECIPES.' SET `output_id` = ?, `output_count` = ?, `disciplines`= ?,
-								`rating` = ?, `type` = ?, `from_item` = ?, `ing_id_1` = ?, `ing_count_1` = ?,
-								`ing_id_2` = ?, `ing_count_2` = ?, `ing_id_3` = ?, `ing_count_3` = ?,
-								`ing_id_4` = ?, `ing_count_4` = ?, `data` = ?, `updated` = ?, `update_time` = ?
-								WHERE `recipe_id` = ?';
-
-					$this->db->multi_insert($sql, $values);
-					unset($response, $values, $changes);
-				}
-				else{
-					print_r([$response, $info]);
-					$this->temp_failed[] = $info['url'];
-				}
-			});
-		}
-	}
-
-	/**
-	 *
-	 */
-	public function skin_refresh(){
-		$this->request('v2/skins');
-		$data = $this->api_response;
-		$values = [];
-		$time = time();
-		foreach($data as $id){
-			$values[] = [$id, $time];
-		}
-		$this->db->multi_insert('INSERT IGNORE INTO '.TABLE_SKINS.' (`skin_id`, `added`) VALUES (?,?)', $values);
-		$this->log('Skin database refresh done. '.count($this->api_response).' items in skins.json.');
-	}
-
-	/**
-	 * @param bool $full_update
-	 */
-	public function skin_update($full_update = false){
-		$this->skins = $this->db->simple_query(
-			'SELECT `skin_id`, `data_de`, `data_en`, `data_es`, `data_fr`, `update_time`
-				FROM '.TABLE_SKINS.(
-			$full_update
-				? ''
-				: ' WHERE `updated` = 0'
-			), true, 'skin_id');
-
-		if(is_array($this->skins)){
-			$ids = array_chunk(array_keys($this->skins), $this->chunksize);
-
-			$urls = [];
-			foreach($ids as $chunk){
-				foreach($this->api_languages as $lang){
-					$urls[] = http_build_query(['lang' => $lang, 'ids' => implode(',', $chunk)]);
-				}
-			}
-
-			$this->multi_request($urls, $this->api_base.'v2/skins?', function ($response, $info){
-				if(in_array($info['http_code'], [200, 206], true)){
-					$response = json_decode($response, true);
-					parse_str(parse_url($info['url'], PHP_URL_QUERY), $params);
-					$changes = [];
-
-					foreach($response as $skin){
-						$skin = array_sort_recursive($skin);
-						$this->temp_data[$skin['id']][$params['lang']] = $skin;
-						$old = json_decode(@$this->skins[$skin['id']]['data_'.$params['lang']], true);
-						$old = is_array($old) ? array_sort_recursive($old) : [];
-						if(!empty($old) && !empty(array_diff_assoc_recursive($old, $skin, true))){
-							$changes[] = [
-								$skin['id'],
-								'skin',
-								$params['lang'],
-								$this->skins[$skin['id']]['update_time'],
-								json_encode($old),
-							];
-						}
-						unset($this->skins[$skin['id']]);
-					}
-
-					$sql = 'INSERT INTO '.TABLE_DIFF.' (`db_id`, `type`, `lang`, `date`, `data`) VALUES (?,?,?,?,?)';
-					$this->db->multi_insert($sql, $changes);
-					unset($changes);
-
-					$ids = explode(',', $params['ids']);
-					if(count($this->temp_data[$ids[0]]) === count($this->api_languages)){
-
-						$values = [];
-						foreach($ids as $id){
-							$file_id = explode('/', str_replace(['https://render.guildwars2.com/file/', '.png'], '', $this->temp_data[$id]['en']['icon']));
-
-							$sub = '';
-							if(isset($this->temp_data[$id]['en']['details']['weight_class'])){
-								$sub = $this->temp_data[$id]['en']['details']['weight_class'];
-							}
-							else if(isset($this->temp_data[$id]['en']['details']['damage_type'])){
-								$sub = $this->temp_data[$id]['en']['details']['damage_type'];
-							}
-
-							$values[] = [
-								$file_id[0],
-								$file_id[1],
-								$this->temp_data[$id]['en']['type'],
-								@$this->temp_data[$id]['en']['details']['type'],
-								$sub,
-								$this->temp_data[$id]['de']['name'],
-								$this->temp_data[$id]['en']['name'],
-								$this->temp_data[$id]['es']['name'],
-								$this->temp_data[$id]['fr']['name'],
-								json_encode($this->temp_data[$id]['de']),
-								json_encode($this->temp_data[$id]['en']),
-								json_encode($this->temp_data[$id]['es']),
-								json_encode($this->temp_data[$id]['fr']),
-								1,
-								time(),
-								$id,
-							];
-
-							$this->log('Updated skin #'.$id);
-							unset($this->temp_data[$id]);
-						}
-						$sql = 'UPDATE '.TABLE_SKINS.' SET `signature`= ?, `file_id`= ?, `type`= ?, `subtype`= ?,
-									`properties` = ?, `name_de`= ?, `name_en`= ?, `name_es`= ?, `name_fr`= ?,
-									`data_de`= ?, `data_en`= ?, `data_es`= ?, `data_fr`= ?, `updated`= ?, `update_time`= ?
-									WHERE `skin_id` = ?';
-
-						$this->db->multi_insert($sql, $values);
-						unset($response, $values);
-					}
-				}
-				else{
-					print_r([$response, $info]);
-					$this->temp_failed[] = $info['url'];
-				}
-			});
-		}
-	}
 
 }
+
